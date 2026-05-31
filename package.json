@@ -1,0 +1,14 @@
+{
+  "name": "youtube-remote-control",
+  "version": "1.0.0",
+  "description": "Shared YouTube remote control — play videos on one screen, control from any device",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  }
+}

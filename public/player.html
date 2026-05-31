@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Remote — Player</title>
+  <meta name="description" content="YouTube Remote Control player view. Open this on your laptop to play videos controlled from any device.">
+  <link rel="stylesheet" href="/css/common.css">
+  <link rel="stylesheet" href="/css/player.css">
+</head>
+<body>
+
+  <div class="player-container">
+    <!-- Waiting screen shown until a video is loaded -->
+    <div class="waiting-screen" id="waitingScreen">
+      <div class="waiting-icon">🎬</div>
+      <h1 class="waiting-title">YouTube Remote</h1>
+      <p class="waiting-subtitle">
+        Waiting for a video…<br>
+        Open the remote on your phone to load one.
+      </p>
+      <div class="connection-status" id="waitingStatus">
+        <span class="connection-dot"></span>
+        <span class="connection-label">Connecting…</span>
+      </div>
+    </div>
+
+    <!-- YouTube player embed -->
+    <div id="youtube-player"></div>
+
+    <!-- Bottom overlay -->
+    <div class="player-overlay glass" id="playerOverlay">
+      <div class="now-playing">
+        <div class="now-playing-icon">▶</div>
+        <div class="now-playing-text">
+          <span class="now-playing-label">Now Playing</span>
+          <span class="now-playing-title" id="overlayTitle">—</span>
+        </div>
+      </div>
+      <div class="connection-status" id="overlayStatus">
+        <span class="connection-dot"></span>
+        <span class="connection-label">Connecting…</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- YouTube IFrame API -->
+  <script>
+    // Load YouTube API
+    const tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(tag);
+
+    let player = null;
+    let ws = null;
+    let stateInterval = null;
+    let reconnectTimer = null;
+    let reconnectDelay = 3000;
+    const MAX_RECONNECT_DELAY = 30000;
+
+    // ── YouTube Player ──
+    function onYouTubeIframeAPIReady() {
+      player = new YT.Player('youtube-player', {
+        width: '100%',
+        height: '100%',
+        playerVars: {
+          autoplay: 0,
+          controls: 1,
+          rel: 0,
+          modestbranding: 1,
+          playsinline: 1,
+        },
+        events: {
+          onReady: onPlayerReady,
+          onStateChange: onPlayerStateChange,
+        },
+      });
+    }
+
+    function onPlayerReady() {
+      console.log('YouTube Player ready');
+      connectWebSocket();
+    }
+
+    function onPlayerStateChange(event) {
+      sendState();
+      // Show/hide overlay
+      const overlay = document.getElementById('playerOverlay');
+      if (event.data === YT.PlayerState.PLAYING || event.data === YT.PlayerState.PAUSED) {
+        overlay.classList.add('visible');
+      }
+    }
+
+    // ── State Broadcasting ──
+    function sendState() {
+      if (!ws || ws.readyState !== WebSocket.OPEN || !player || typeof player.getCurrentTime !== 'function') return;
+
+      let title = '—';
+      try {
+        const data = player.getVideoData();
+        if (data && data.title) title = data.title;
+      } catch {}
+
+      const msg = {
+        type: 'state',
+        playing: player.getPlayerState() === YT.PlayerState.PLAYING,
+        currentTime: player.getCurrentTime() || 0,
+        duration: player.getDuration() || 0,
+        volume: player.getVolume() || 0,
+        muted: player.isMuted() || false,
+        title: title,
+        videoId: player.getVideoData()?.video_id || '',
+      };
+
+      ws.send(JSON.stringify(msg));
+      document.getElementById('overlayTitle').textContent = title;
+    }
+
+    function startStateBroadcast() {
+      if (stateInterval) clearInterval(stateInterval);
+      stateInterval = setInterval(sendState, 1000);
+    }
+
+    // ── WebSocket ──
+    function connectWebSocket() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${protocol}//${location.host}`);
+
+      ws.addEventListener('open', () => {
+        console.log('WebSocket connected');
+        reconnectDelay = 3000; // Reset backoff
+        ws.send(JSON.stringify({ type: 'register', role: 'player' }));
+        updateConnectionStatus('connected');
+        startStateBroadcast();
+      });
+
+      ws.addEventListener('message', (event) => {
+        let msg;
+        try {
+          msg = JSON.parse(event.data);
+        } catch { return; }
+
+        if (msg.type !== 'command' || !player) return;
+
+        handleCommand(msg);
+      });
+
+      ws.addEventListener('close', () => {
+        console.log('WebSocket closed, reconnecting…');
+        updateConnectionStatus('reconnecting');
+        scheduleReconnect();
+      });
+
+      ws.addEventListener('error', () => {
+        updateConnectionStatus('reconnecting');
+      });
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        connectWebSocket();
+        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+      }, reconnectDelay);
+    }
+
+    // ── Command Handler ──
+    function handleCommand(msg) {
+      const waiting = document.getElementById('waitingScreen');
+
+      switch (msg.action) {
+        case 'play':
+          player.playVideo();
+          break;
+        case 'pause':
+          player.pauseVideo();
+          break;
+        case 'stop':
+          player.stopVideo();
+          break;
+        case 'seekForward':
+          player.seekTo(player.getCurrentTime() + 10, true);
+          break;
+        case 'seekBackward':
+          player.seekTo(Math.max(0, player.getCurrentTime() - 10), true);
+          break;
+        case 'setVolume':
+          player.unMute();
+          player.setVolume(msg.value);
+          break;
+        case 'toggleMute':
+          if (player.isMuted()) {
+            player.unMute();
+          } else {
+            player.mute();
+          }
+          // Send state immediately so remote gets updated mute status
+          setTimeout(sendState, 100);
+          break;
+        case 'loadVideo':
+          const videoId = extractVideoId(msg.value);
+          if (videoId) {
+            player.loadVideoById(videoId);
+            waiting.classList.add('hidden');
+            document.getElementById('playerOverlay').classList.add('visible');
+          }
+          break;
+      }
+
+      // Immediate state update after command
+      setTimeout(sendState, 200);
+    }
+
+    function extractVideoId(input) {
+      if (!input) return null;
+      input = input.trim();
+
+      // Full URLs
+      const patterns = [
+        /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
+      ];
+
+      for (const pattern of patterns) {
+        const match = input.match(pattern);
+        if (match) return match[1];
+      }
+
+      // Bare video ID
+      if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input;
+
+      return null;
+    }
+
+    // ── Connection Status UI ──
+    function updateConnectionStatus(status) {
+      const els = document.querySelectorAll('.connection-status');
+      els.forEach((el) => {
+        el.className = 'connection-status ' + status;
+        const label = el.querySelector('.connection-label');
+        if (label) {
+          switch (status) {
+            case 'connected': label.textContent = 'Connected'; break;
+            case 'reconnecting': label.textContent = 'Reconnecting…'; break;
+            default: label.textContent = 'Disconnected';
+          }
+        }
+      });
+    }
+  </script>
+</body>
+</html>

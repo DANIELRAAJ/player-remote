@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>YouTube Remote — Control</title>
+  <meta name="description" content="YouTube Remote Control — control playback from your phone.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0a0a0f">
+  <link rel="stylesheet" href="/css/common.css">
+  <link rel="stylesheet" href="/css/remote.css">
+</head>
+<body>
+
+  <div class="remote-container">
+
+    <!-- Header -->
+    <header class="remote-header">
+      <div class="remote-logo">
+        <div class="remote-logo-icon">🎮</div>
+        <span class="remote-logo-text">Remote</span>
+      </div>
+      <div class="connection-status" id="connectionStatus">
+        <span class="connection-dot"></span>
+        <span class="connection-label">Connecting…</span>
+      </div>
+    </header>
+
+    <!-- Now Playing -->
+    <section class="card glass now-playing-card" id="nowPlayingCard">
+      <div class="card-label">Now Playing</div>
+      <div class="now-playing-info">
+        <span class="now-playing-title" id="nowPlayingTitle">
+          <span class="now-playing-idle">No video loaded</span>
+        </span>
+      </div>
+      <div class="progress-container">
+        <div class="progress-bar">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <div class="progress-time">
+          <span id="currentTime">0:00</span>
+          <span id="totalTime">0:00</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Transport Controls -->
+    <section class="card glass transport-card">
+      <div class="card-label">Playback</div>
+      <div class="transport-buttons">
+        <button class="btn-transport" id="btnRewind" title="Rewind 10s" aria-label="Rewind 10 seconds">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M11 17l-5-5 5-5"/>
+            <path d="M18 17l-5-5 5-5"/>
+          </svg>
+        </button>
+        <button class="btn-transport btn-play" id="btnPlayPause" title="Play / Pause" aria-label="Play or Pause">
+          <span id="playIcon">▶</span>
+        </button>
+        <button class="btn-transport" id="btnForward" title="Forward 10s" aria-label="Forward 10 seconds">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13 17l5-5-5-5"/>
+            <path d="M6 17l5-5-5-5"/>
+          </svg>
+        </button>
+      </div>
+    </section>
+
+    <!-- Volume -->
+    <section class="card glass volume-card">
+      <div class="card-label">Volume</div>
+      <div class="volume-row">
+        <button class="btn-mute" id="btnMute" title="Toggle Mute" aria-label="Toggle mute">
+          <span id="muteIcon">🔊</span>
+        </button>
+        <input type="range" class="volume-slider" id="volumeSlider" min="0" max="100" value="100" aria-label="Volume">
+        <span class="volume-value" id="volumeValue">100</span>
+      </div>
+    </section>
+
+    <!-- Load Video -->
+    <section class="card glass load-card">
+      <div class="card-label">Load Video</div>
+      <div class="load-input-row">
+        <input
+          type="url"
+          class="load-input"
+          id="videoInput"
+          placeholder="Paste YouTube URL or video ID"
+          aria-label="YouTube URL or video ID"
+          enterkeyhint="go"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+        >
+        <button class="btn-load" id="btnLoad" aria-label="Load video">Load</button>
+      </div>
+      <p class="load-hint">Supports youtube.com/watch?v=…, youtu.be/…, or video IDs</p>
+    </section>
+
+  </div>
+
+  <script>
+    // ── State ──
+    let ws = null;
+    let isPlaying = false;
+    let isMuted = false;
+    let reconnectTimer = null;
+    let reconnectDelay = 3000;
+    const MAX_RECONNECT_DELAY = 30000;
+
+    // ── DOM References ──
+    const btnPlayPause = document.getElementById('btnPlayPause');
+    const playIcon = document.getElementById('playIcon');
+    const btnRewind = document.getElementById('btnRewind');
+    const btnForward = document.getElementById('btnForward');
+    const btnMute = document.getElementById('btnMute');
+    const muteIcon = document.getElementById('muteIcon');
+    const volumeSlider = document.getElementById('volumeSlider');
+    const volumeValue = document.getElementById('volumeValue');
+    const videoInput = document.getElementById('videoInput');
+    const btnLoad = document.getElementById('btnLoad');
+    const nowPlayingTitle = document.getElementById('nowPlayingTitle');
+    const progressFill = document.getElementById('progressFill');
+    const currentTimeEl = document.getElementById('currentTime');
+    const totalTimeEl = document.getElementById('totalTime');
+
+    // ── WebSocket ──
+    function connectWebSocket() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${protocol}//${location.host}`);
+
+      ws.addEventListener('open', () => {
+        reconnectDelay = 3000; // Reset backoff
+        ws.send(JSON.stringify({ type: 'register', role: 'remote' }));
+        updateConnectionStatus('connected');
+      });
+
+      ws.addEventListener('message', (event) => {
+        let msg;
+        try {
+          msg = JSON.parse(event.data);
+        } catch { return; }
+
+        if (msg.type === 'state') {
+          handleState(msg);
+        }
+      });
+
+      ws.addEventListener('close', () => {
+        updateConnectionStatus('reconnecting');
+        scheduleReconnect();
+      });
+
+      ws.addEventListener('error', () => {
+        updateConnectionStatus('reconnecting');
+      });
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        connectWebSocket();
+        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+      }, reconnectDelay);
+    }
+
+    function sendCommand(action, value) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: 'command', action, value }));
+    }
+
+    // ── State Handler ──
+    function handleState(state) {
+      // Playing state
+      isPlaying = state.playing;
+      playIcon.textContent = isPlaying ? '❚❚' : '▶';
+
+      // Title
+      if (state.title && state.title !== '—') {
+        nowPlayingTitle.innerHTML = '';
+        nowPlayingTitle.textContent = state.title;
+      } else {
+        nowPlayingTitle.innerHTML = '<span class="now-playing-idle">No video loaded</span>';
+      }
+
+      // Progress
+      if (state.duration > 0) {
+        const pct = (state.currentTime / state.duration) * 100;
+        progressFill.style.width = pct + '%';
+        currentTimeEl.textContent = formatTime(state.currentTime);
+        totalTimeEl.textContent = formatTime(state.duration);
+      } else {
+        progressFill.style.width = '0%';
+        currentTimeEl.textContent = '0:00';
+        totalTimeEl.textContent = '0:00';
+      }
+
+      // Volume (only update slider if user isn't dragging)
+      if (!volumeSlider.matches(':active')) {
+        volumeSlider.value = state.volume;
+        volumeValue.textContent = state.volume;
+        updateSliderTrack(state.volume);
+      }
+
+      // Mute
+      isMuted = state.muted;
+      updateMuteUI();
+    }
+
+    function formatTime(seconds) {
+      const s = Math.floor(seconds);
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      const h = Math.floor(m / 60);
+      const min = m % 60;
+      if (h > 0) {
+        return `${h}:${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+      }
+      return `${min}:${String(sec).padStart(2, '0')}`;
+    }
+
+    // ── Volume Slider Track Fill ──
+    function updateSliderTrack(val) {
+      const pct = val + '%';
+      volumeSlider.style.background = `linear-gradient(to right, var(--accent) 0%, var(--accent) ${pct}, rgba(255,255,255,0.08) ${pct})`;
+    }
+
+    // ── Mute UI ──
+    function updateMuteUI() {
+      if (isMuted) {
+        muteIcon.textContent = '🔇';
+        btnMute.classList.add('muted');
+      } else {
+        const vol = parseInt(volumeSlider.value, 10);
+        if (vol === 0) muteIcon.textContent = '🔇';
+        else if (vol < 50) muteIcon.textContent = '🔉';
+        else muteIcon.textContent = '🔊';
+        btnMute.classList.remove('muted');
+      }
+    }
+
+    // ── Event Listeners ──
+    btnPlayPause.addEventListener('click', () => {
+      sendCommand(isPlaying ? 'pause' : 'play');
+    });
+
+    btnRewind.addEventListener('click', () => {
+      sendCommand('seekBackward');
+    });
+
+    btnForward.addEventListener('click', () => {
+      sendCommand('seekForward');
+    });
+
+    btnMute.addEventListener('click', () => {
+      sendCommand('toggleMute');
+    });
+
+    volumeSlider.addEventListener('input', () => {
+      const val = parseInt(volumeSlider.value, 10);
+      volumeValue.textContent = val;
+      updateSliderTrack(val);
+      updateMuteUI();
+      sendCommand('setVolume', val);
+    });
+
+    btnLoad.addEventListener('click', loadVideo);
+
+    videoInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') loadVideo();
+    });
+
+    function loadVideo() {
+      const val = videoInput.value.trim();
+      if (!val) return;
+      sendCommand('loadVideo', val);
+      videoInput.value = '';
+      videoInput.blur();
+    }
+
+    // ── Connection Status ──
+    function updateConnectionStatus(status) {
+      const el = document.getElementById('connectionStatus');
+      el.className = 'connection-status ' + status;
+      const label = el.querySelector('.connection-label');
+      switch (status) {
+        case 'connected': label.textContent = 'Connected'; break;
+        case 'reconnecting': label.textContent = 'Reconnecting…'; break;
+        default: label.textContent = 'Disconnected';
+      }
+    }
+
+    // ── Init ──
+    updateSliderTrack(100);
+    connectWebSocket();
+  </script>
+</body>
+</html>
