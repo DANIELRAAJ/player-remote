@@ -60,29 +60,38 @@
 
     // ── YouTube Player ──
     function onYouTubeIframeAPIReady() {
+      console.log('[Player] YouTube IFrame API ready, creating player…');
       player = new YT.Player('youtube-player', {
         width: '100%',
         height: '100%',
+        videoId: '',
         playerVars: {
-          autoplay: 0,
+          autoplay: 1,
           controls: 1,
           rel: 0,
           modestbranding: 1,
           playsinline: 1,
+          origin: window.location.origin,
         },
         events: {
           onReady: onPlayerReady,
           onStateChange: onPlayerStateChange,
+          onError: onPlayerError,
         },
       });
     }
 
     function onPlayerReady() {
-      console.log('YouTube Player ready');
+      console.log('[Player] YouTube Player ready');
       connectWebSocket();
     }
 
+    function onPlayerError(event) {
+      console.error('[Player] YouTube error code:', event.data);
+    }
+
     function onPlayerStateChange(event) {
+      console.log('[Player] State changed:', event.data);
       sendState();
       // Show/hide overlay
       const overlay = document.getElementById('playerOverlay');
@@ -124,11 +133,13 @@
     // ── WebSocket ──
     function connectWebSocket() {
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${protocol}//${location.host}`);
+      const wsUrl = `${protocol}//${location.host}`;
+      console.log('[Player] Connecting WebSocket to', wsUrl);
+      ws = new WebSocket(wsUrl);
 
       ws.addEventListener('open', () => {
-        console.log('WebSocket connected');
-        reconnectDelay = 3000; // Reset backoff
+        console.log('[Player] WebSocket connected');
+        reconnectDelay = 3000;
         ws.send(JSON.stringify({ type: 'register', role: 'player' }));
         updateConnectionStatus('connected');
         startStateBroadcast();
@@ -140,18 +151,21 @@
           msg = JSON.parse(event.data);
         } catch { return; }
 
+        console.log('[Player] Received message:', msg);
+
         if (msg.type !== 'command' || !player) return;
 
         handleCommand(msg);
       });
 
       ws.addEventListener('close', () => {
-        console.log('WebSocket closed, reconnecting…');
+        console.log('[Player] WebSocket closed, reconnecting…');
         updateConnectionStatus('reconnecting');
         scheduleReconnect();
       });
 
-      ws.addEventListener('error', () => {
+      ws.addEventListener('error', (err) => {
+        console.error('[Player] WebSocket error:', err);
         updateConnectionStatus('reconnecting');
       });
     }
@@ -166,6 +180,7 @@
 
     // ── Command Handler ──
     function handleCommand(msg) {
+      console.log('[Player] Handling command:', msg.action, msg.value || '');
       const waiting = document.getElementById('waitingScreen');
 
       switch (msg.action) {
@@ -194,15 +209,17 @@
           } else {
             player.mute();
           }
-          // Send state immediately so remote gets updated mute status
           setTimeout(sendState, 100);
           break;
         case 'loadVideo':
           const videoId = extractVideoId(msg.value);
+          console.log('[Player] Loading video ID:', videoId, '(raw value:', msg.value, ')');
           if (videoId) {
             player.loadVideoById(videoId);
             waiting.classList.add('hidden');
             document.getElementById('playerOverlay').classList.add('visible');
+          } else {
+            console.error('[Player] Could not extract video ID from:', msg.value);
           }
           break;
       }
@@ -215,9 +232,9 @@
       if (!input) return null;
       input = input.trim();
 
-      // Full URLs
+      // Full YouTube URLs
       const patterns = [
-        /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
+        /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]+)/,
       ];
 
       for (const pattern of patterns) {
@@ -225,8 +242,8 @@
         if (match) return match[1];
       }
 
-      // Bare video ID
-      if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input;
+      // Accept any alphanumeric video ID (yt-search provides these directly)
+      if (/^[a-zA-Z0-9_-]+$/.test(input)) return input;
 
       return null;
     }

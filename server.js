@@ -90,6 +90,7 @@ wss.on('connection', (ws) => {
 
       case 'command':
         // Forward command from remote → all players
+        console.log(`📡 Command: ${msg.action}${msg.value ? ' → ' + msg.value : ''} (→ ${players.size} players)`);
         for (const player of players) {
           if (player.readyState === 1) {
             player.send(JSON.stringify(msg));
