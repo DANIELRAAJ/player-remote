@@ -11,8 +11,18 @@
 <body>
 
   <div class="player-container">
+    <!-- Click-to-activate overlay (needed for browser autoplay policy) -->
+    <div class="activate-overlay" id="activateOverlay">
+      <div class="activate-content">
+        <div class="activate-icon">🎬</div>
+        <h1 class="activate-title">YouTube Remote</h1>
+        <p class="activate-subtitle">Tap anywhere to activate the player</p>
+        <div class="activate-hint">Required by your browser to enable playback</div>
+      </div>
+    </div>
+
     <!-- Waiting screen shown until a video is loaded -->
-    <div class="waiting-screen" id="waitingScreen">
+    <div class="waiting-screen" id="waitingScreen" style="display:none;">
       <div class="waiting-icon">🎬</div>
       <h1 class="waiting-title">YouTube Remote</h1>
       <p class="waiting-subtitle">
@@ -48,6 +58,7 @@
   <script>
     let player = null;
     let ytReady = false;
+    let activated = false;
     let ws = null;
     let stateInterval = null;
     let reconnectTimer = null;
@@ -55,28 +66,52 @@
     let pendingVideoId = null;
     const MAX_RECONNECT_DELAY = 30000;
 
-    // Load YouTube IFrame API script
-    const tag = document.createElement('script');
-    tag.src = 'https://www.youtube.com/iframe_api';
-    const firstScript = document.getElementsByTagName('script')[0];
-    firstScript.parentNode.insertBefore(tag, firstScript);
+    // ── Activation overlay (user gesture needed for autoplay) ──
+    const activateOverlay = document.getElementById('activateOverlay');
+    activateOverlay.addEventListener('click', () => {
+      activated = true;
+      activateOverlay.classList.add('hidden');
+      document.getElementById('waitingScreen').style.display = '';
+
+      // Load the YouTube API now that we have a user gesture
+      const tag = document.createElement('script');
+      tag.src = 'https://www.youtube.com/iframe_api';
+      document.head.appendChild(tag);
+    });
 
     // Called automatically by YouTube IFrame API when ready
     function onYouTubeIframeAPIReady() {
       console.log('[Player] YouTube IFrame API loaded');
       ytReady = true;
 
-      // Connect WebSocket right away (don't wait for player creation)
+      // Connect WebSocket right away
       connectWebSocket();
+
+      // If a video was queued while API was loading, play it now
+      if (pendingVideoId) {
+        const vid = pendingVideoId;
+        pendingVideoId = null;
+        handleCommand({ action: 'loadVideo', value: vid });
+      }
     }
 
-    // Create the YT player with a real video ID (avoids empty-iframe bug)
+    // Create the YT player with a real video ID
     function createPlayer(videoId) {
       console.log('[Player] Creating YT.Player with video:', videoId);
 
-      // Destroy old player if exists
+      // Destroy old player if exists — destroy() removes the DOM element,
+      // so we must recreate the target div before calling new YT.Player()
       if (player && player.destroy) {
         try { player.destroy(); } catch (e) {}
+        player = null;
+      }
+
+      // Ensure the target element exists (YT.Player replaces it with an iframe)
+      let targetEl = document.getElementById('youtube-player');
+      if (!targetEl) {
+        targetEl = document.createElement('div');
+        targetEl.id = 'youtube-player';
+        document.querySelector('.player-container').appendChild(targetEl);
       }
 
       player = new YT.Player('youtube-player', {
@@ -90,6 +125,7 @@
           modestbranding: 1,
           playsinline: 1,
           fs: 1,
+          origin: window.location.origin,
         },
         events: {
           onReady: function () {
