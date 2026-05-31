@@ -46,69 +46,87 @@
 
   <!-- YouTube IFrame API -->
   <script>
-    // Load YouTube API
-    const tag = document.createElement('script');
-    tag.src = 'https://www.youtube.com/iframe_api';
-    document.head.appendChild(tag);
-
     let player = null;
+    let ytReady = false;
     let ws = null;
     let stateInterval = null;
     let reconnectTimer = null;
     let reconnectDelay = 3000;
+    let pendingVideoId = null;
     const MAX_RECONNECT_DELAY = 30000;
 
-    // ── YouTube Player ──
+    // Load YouTube IFrame API script
+    const tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    const firstScript = document.getElementsByTagName('script')[0];
+    firstScript.parentNode.insertBefore(tag, firstScript);
+
+    // Called automatically by YouTube IFrame API when ready
     function onYouTubeIframeAPIReady() {
-      console.log('[Player] YouTube IFrame API ready, creating player…');
+      console.log('[Player] YouTube IFrame API loaded');
+      ytReady = true;
+
+      // Connect WebSocket right away (don't wait for player creation)
+      connectWebSocket();
+    }
+
+    // Create the YT player with a real video ID (avoids empty-iframe bug)
+    function createPlayer(videoId) {
+      console.log('[Player] Creating YT.Player with video:', videoId);
+
+      // Destroy old player if exists
+      if (player && player.destroy) {
+        try { player.destroy(); } catch (e) {}
+      }
+
       player = new YT.Player('youtube-player', {
         width: '100%',
         height: '100%',
-        videoId: '',
+        videoId: videoId,
         playerVars: {
           autoplay: 1,
           controls: 1,
           rel: 0,
           modestbranding: 1,
           playsinline: 1,
-          origin: window.location.origin,
+          fs: 1,
         },
         events: {
-          onReady: onPlayerReady,
-          onStateChange: onPlayerStateChange,
-          onError: onPlayerError,
+          onReady: function () {
+            console.log('[Player] YT.Player ready, video should be playing');
+            document.getElementById('waitingScreen').classList.add('hidden');
+            document.getElementById('playerOverlay').classList.add('visible');
+            startStateBroadcast();
+          },
+          onStateChange: function (event) {
+            console.log('[Player] State changed:', event.data);
+            sendState();
+            const overlay = document.getElementById('playerOverlay');
+            if (event.data === YT.PlayerState.PLAYING || event.data === YT.PlayerState.PAUSED) {
+              overlay.classList.add('visible');
+            }
+          },
+          onError: function (event) {
+            console.error('[Player] YouTube error code:', event.data);
+          },
         },
       });
     }
 
-    function onPlayerReady() {
-      console.log('[Player] YouTube Player ready');
-      connectWebSocket();
-    }
-
-    function onPlayerError(event) {
-      console.error('[Player] YouTube error code:', event.data);
-    }
-
-    function onPlayerStateChange(event) {
-      console.log('[Player] State changed:', event.data);
-      sendState();
-      // Show/hide overlay
-      const overlay = document.getElementById('playerOverlay');
-      if (event.data === YT.PlayerState.PLAYING || event.data === YT.PlayerState.PAUSED) {
-        overlay.classList.add('visible');
-      }
-    }
-
     // ── State Broadcasting ──
     function sendState() {
-      if (!ws || ws.readyState !== WebSocket.OPEN || !player || typeof player.getCurrentTime !== 'function') return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!player || typeof player.getCurrentTime !== 'function') return;
 
       let title = '—';
+      let videoId = '';
       try {
         const data = player.getVideoData();
-        if (data && data.title) title = data.title;
-      } catch {}
+        if (data) {
+          if (data.title) title = data.title;
+          if (data.video_id) videoId = data.video_id;
+        }
+      } catch (e) {}
 
       const msg = {
         type: 'state',
@@ -118,7 +136,7 @@
         volume: player.getVolume() || 0,
         muted: player.isMuted() || false,
         title: title,
-        videoId: player.getVideoData()?.video_id || '',
+        videoId: videoId,
       };
 
       ws.send(JSON.stringify(msg));
@@ -142,7 +160,10 @@
         reconnectDelay = 3000;
         ws.send(JSON.stringify({ type: 'register', role: 'player' }));
         updateConnectionStatus('connected');
-        startStateBroadcast();
+        // If player already exists, restart state broadcast
+        if (player && typeof player.getCurrentTime === 'function') {
+          startStateBroadcast();
+        }
       });
 
       ws.addEventListener('message', (event) => {
@@ -151,21 +172,20 @@
           msg = JSON.parse(event.data);
         } catch { return; }
 
-        console.log('[Player] Received message:', msg);
-
-        if (msg.type !== 'command' || !player) return;
-
-        handleCommand(msg);
+        if (msg.type === 'command') {
+          console.log('[Player] Received command:', msg.action, msg.value || '');
+          handleCommand(msg);
+        }
       });
 
       ws.addEventListener('close', () => {
-        console.log('[Player] WebSocket closed, reconnecting…');
+        console.log('[Player] WebSocket closed, will reconnect…');
         updateConnectionStatus('reconnecting');
         scheduleReconnect();
       });
 
       ws.addEventListener('error', (err) => {
-        console.error('[Player] WebSocket error:', err);
+        console.error('[Player] WebSocket error');
         updateConnectionStatus('reconnecting');
       });
     }
@@ -180,78 +200,95 @@
 
     // ── Command Handler ──
     function handleCommand(msg) {
-      console.log('[Player] Handling command:', msg.action, msg.value || '');
-      const waiting = document.getElementById('waitingScreen');
-
       switch (msg.action) {
-        case 'play':
-          player.playVideo();
-          break;
-        case 'pause':
-          player.pauseVideo();
-          break;
-        case 'stop':
-          player.stopVideo();
-          break;
-        case 'seekForward':
-          player.seekTo(player.getCurrentTime() + 10, true);
-          break;
-        case 'seekBackward':
-          player.seekTo(Math.max(0, player.getCurrentTime() - 10), true);
-          break;
-        case 'setVolume':
-          player.unMute();
-          player.setVolume(msg.value);
-          break;
-        case 'toggleMute':
-          if (player.isMuted()) {
-            player.unMute();
-          } else {
-            player.mute();
-          }
-          setTimeout(sendState, 100);
-          break;
         case 'loadVideo':
           const videoId = extractVideoId(msg.value);
-          console.log('[Player] Loading video ID:', videoId, '(raw value:', msg.value, ')');
-          if (videoId) {
-            player.loadVideoById(videoId);
-            waiting.classList.add('hidden');
-            document.getElementById('playerOverlay').classList.add('visible');
+          console.log('[Player] loadVideo → extracted ID:', videoId);
+          if (!videoId) {
+            console.error('[Player] Invalid video ID from:', msg.value);
+            return;
+          }
+
+          if (!player || typeof player.loadVideoById !== 'function') {
+            // First video — create the player fresh with this video
+            console.log('[Player] No player yet, creating with video:', videoId);
+            createPlayer(videoId);
           } else {
-            console.error('[Player] Could not extract video ID from:', msg.value);
+            // Player exists — just load the new video
+            console.log('[Player] Loading new video into existing player:', videoId);
+            player.loadVideoById(videoId);
+            document.getElementById('waitingScreen').classList.add('hidden');
+            document.getElementById('playerOverlay').classList.add('visible');
+          }
+          break;
+
+        case 'play':
+          if (player && player.playVideo) player.playVideo();
+          break;
+
+        case 'pause':
+          if (player && player.pauseVideo) player.pauseVideo();
+          break;
+
+        case 'stop':
+          if (player && player.stopVideo) player.stopVideo();
+          break;
+
+        case 'seekForward':
+          if (player && player.getCurrentTime) {
+            player.seekTo(player.getCurrentTime() + 10, true);
+          }
+          break;
+
+        case 'seekBackward':
+          if (player && player.getCurrentTime) {
+            player.seekTo(Math.max(0, player.getCurrentTime() - 10), true);
+          }
+          break;
+
+        case 'setVolume':
+          if (player && player.setVolume) {
+            player.unMute();
+            player.setVolume(msg.value);
+          }
+          break;
+
+        case 'toggleMute':
+          if (player && player.isMuted) {
+            if (player.isMuted()) {
+              player.unMute();
+            } else {
+              player.mute();
+            }
+            setTimeout(sendState, 100);
           }
           break;
       }
 
-      // Immediate state update after command
-      setTimeout(sendState, 200);
+      setTimeout(sendState, 300);
     }
 
     function extractVideoId(input) {
       if (!input) return null;
-      input = input.trim();
+      input = String(input).trim();
 
-      // Full YouTube URLs
-      const patterns = [
-        /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]+)/,
-      ];
+      // YouTube URL patterns
+      const match = input.match(
+        /(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]+)/
+      );
+      if (match) return match[1];
 
-      for (const pattern of patterns) {
-        const match = input.match(pattern);
-        if (match) return match[1];
+      // Raw video ID (letters, numbers, dash, underscore)
+      if (/^[a-zA-Z0-9_-]+$/.test(input) && input.length >= 8 && input.length <= 16) {
+        return input;
       }
-
-      // Accept any alphanumeric video ID (yt-search provides these directly)
-      if (/^[a-zA-Z0-9_-]+$/.test(input)) return input;
 
       return null;
     }
 
     // ── Connection Status UI ──
     function updateConnectionStatus(status) {
-      const els = document.querySelectorAll('.connection-status');
-      els.forEach((el) => {
+      document.querySelectorAll('.connection-status').forEach((el) => {
         el.className = 'connection-status ' + status;
         const label = el.querySelector('.connection-label');
         if (label) {
