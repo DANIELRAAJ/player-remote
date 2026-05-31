@@ -3,6 +3,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
 const os = require('os');
+const yts = require('yt-search');
 
 const app = express();
 const server = http.createServer(app);
@@ -23,6 +24,37 @@ app.get('/remote', (_req, res) => {
 app.get('/', (_req, res) => {
   res.redirect('/remote');
 });
+
+// --- YouTube Search API ---
+app.get('/api/search', async (req, res) => {
+  const query = req.query.q;
+  if (!query || query.trim().length === 0) {
+    return res.json({ videos: [] });
+  }
+
+  try {
+    const results = await yts(query);
+    const videos = results.videos.slice(0, 12).map((v) => ({
+      id: v.videoId,
+      title: v.title,
+      thumbnail: v.thumbnail || `https://img.youtube.com/vi/${v.videoId}/mqdefault.jpg`,
+      duration: v.timestamp,
+      channel: v.author?.name || '',
+      views: v.views ? formatViews(v.views) : '',
+    }));
+    res.json({ videos });
+  } catch (err) {
+    console.error('Search error:', err.message);
+    res.status(500).json({ videos: [], error: 'Search failed' });
+  }
+});
+
+function formatViews(num) {
+  if (num >= 1_000_000_000) return (num / 1_000_000_000).toFixed(1) + 'B';
+  if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + 'M';
+  if (num >= 1_000) return (num / 1_000).toFixed(1) + 'K';
+  return String(num);
+}
 
 // --- WebSocket Hub ---
 const players = new Set();

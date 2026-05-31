@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>YouTube Remote — Control</title>
-  <meta name="description" content="YouTube Remote Control — control playback from your phone.">
+  <meta name="description" content="YouTube Remote Control — search, browse and control playback from your phone.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0a0a0f">
@@ -27,28 +27,31 @@
       </div>
     </header>
 
-    <!-- Now Playing -->
-    <section class="card glass now-playing-card" id="nowPlayingCard">
-      <div class="card-label">Now Playing</div>
-      <div class="now-playing-info">
-        <span class="now-playing-title" id="nowPlayingTitle">
-          <span class="now-playing-idle">No video loaded</span>
-        </span>
-      </div>
-      <div class="progress-container">
-        <div class="progress-bar">
-          <div class="progress-fill" id="progressFill"></div>
+    <!-- Mini Player Preview -->
+    <section class="card glass mini-player-card" id="miniPlayerCard">
+      <div class="mini-player-wrapper" id="miniPlayerWrapper">
+        <div class="mini-player-placeholder" id="miniPlaceholder">
+          <span class="mini-placeholder-icon">🎬</span>
+          <span class="mini-placeholder-text">Search & play a video</span>
         </div>
-        <div class="progress-time">
-          <span id="currentTime">0:00</span>
-          <span id="totalTime">0:00</span>
+        <div class="mini-player-iframe" id="miniPlayerIframe"></div>
+      </div>
+      <div class="mini-player-info" id="miniPlayerInfo">
+        <span class="mini-player-title" id="miniPlayerTitle">No video loaded</span>
+        <div class="progress-container">
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <div class="progress-time">
+            <span id="currentTime">0:00</span>
+            <span id="totalTime">0:00</span>
+          </div>
         </div>
       </div>
     </section>
 
     <!-- Transport Controls -->
     <section class="card glass transport-card">
-      <div class="card-label">Playback</div>
       <div class="transport-buttons">
         <button class="btn-transport" id="btnRewind" title="Rewind 10s" aria-label="Rewind 10 seconds">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -70,7 +73,6 @@
 
     <!-- Volume -->
     <section class="card glass volume-card">
-      <div class="card-label">Volume</div>
       <div class="volume-row">
         <button class="btn-mute" id="btnMute" title="Toggle Mute" aria-label="Toggle mute">
           <span id="muteIcon">🔊</span>
@@ -80,25 +82,43 @@
       </div>
     </section>
 
-    <!-- Load Video -->
-    <section class="card glass load-card">
-      <div class="card-label">Load Video</div>
-      <div class="load-input-row">
+    <!-- Search -->
+    <section class="card glass search-card">
+      <div class="search-input-row">
+        <div class="search-icon-wrapper">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/>
+            <path d="M21 21l-4.35-4.35"/>
+          </svg>
+        </div>
         <input
-          type="url"
-          class="load-input"
-          id="videoInput"
-          placeholder="Paste YouTube URL or video ID"
-          aria-label="YouTube URL or video ID"
-          enterkeyhint="go"
+          type="search"
+          class="search-input"
+          id="searchInput"
+          placeholder="Search YouTube..."
+          aria-label="Search YouTube"
+          enterkeyhint="search"
           autocomplete="off"
           autocapitalize="off"
           spellcheck="false"
         >
-        <button class="btn-load" id="btnLoad" aria-label="Load video">Load</button>
+        <button class="btn-search-clear" id="btnClear" aria-label="Clear search" style="display:none;">✕</button>
       </div>
-      <p class="load-hint">Supports youtube.com/watch?v=…, youtu.be/…, or video IDs</p>
     </section>
+
+    <!-- Search Results -->
+    <section class="results-grid" id="resultsGrid"></section>
+
+    <!-- Loading spinner -->
+    <div class="search-loading" id="searchLoading" style="display:none;">
+      <div class="spinner"></div>
+      <span>Searching...</span>
+    </div>
+
+    <!-- Empty state -->
+    <div class="search-empty" id="searchEmpty" style="display:none;">
+      <span>No results found</span>
+    </div>
 
   </div>
 
@@ -109,6 +129,8 @@
     let isMuted = false;
     let reconnectTimer = null;
     let reconnectDelay = 3000;
+    let searchTimer = null;
+    let currentVideoId = null;
     const MAX_RECONNECT_DELAY = 30000;
 
     // ── DOM References ──
@@ -120,9 +142,14 @@
     const muteIcon = document.getElementById('muteIcon');
     const volumeSlider = document.getElementById('volumeSlider');
     const volumeValue = document.getElementById('volumeValue');
-    const videoInput = document.getElementById('videoInput');
-    const btnLoad = document.getElementById('btnLoad');
-    const nowPlayingTitle = document.getElementById('nowPlayingTitle');
+    const searchInput = document.getElementById('searchInput');
+    const btnClear = document.getElementById('btnClear');
+    const resultsGrid = document.getElementById('resultsGrid');
+    const searchLoading = document.getElementById('searchLoading');
+    const searchEmpty = document.getElementById('searchEmpty');
+    const miniPlayerTitle = document.getElementById('miniPlayerTitle');
+    const miniPlayerIframe = document.getElementById('miniPlayerIframe');
+    const miniPlaceholder = document.getElementById('miniPlaceholder');
     const progressFill = document.getElementById('progressFill');
     const currentTimeEl = document.getElementById('currentTime');
     const totalTimeEl = document.getElementById('totalTime');
@@ -133,20 +160,15 @@
       ws = new WebSocket(`${protocol}//${location.host}`);
 
       ws.addEventListener('open', () => {
-        reconnectDelay = 3000; // Reset backoff
+        reconnectDelay = 3000;
         ws.send(JSON.stringify({ type: 'register', role: 'remote' }));
         updateConnectionStatus('connected');
       });
 
       ws.addEventListener('message', (event) => {
         let msg;
-        try {
-          msg = JSON.parse(event.data);
-        } catch { return; }
-
-        if (msg.type === 'state') {
-          handleState(msg);
-        }
+        try { msg = JSON.parse(event.data); } catch { return; }
+        if (msg.type === 'state') handleState(msg);
       });
 
       ws.addEventListener('close', () => {
@@ -174,16 +196,20 @@
 
     // ── State Handler ──
     function handleState(state) {
-      // Playing state
       isPlaying = state.playing;
       playIcon.textContent = isPlaying ? '❚❚' : '▶';
 
       // Title
       if (state.title && state.title !== '—') {
-        nowPlayingTitle.innerHTML = '';
-        nowPlayingTitle.textContent = state.title;
+        miniPlayerTitle.textContent = state.title;
       } else {
-        nowPlayingTitle.innerHTML = '<span class="now-playing-idle">No video loaded</span>';
+        miniPlayerTitle.textContent = 'No video loaded';
+      }
+
+      // Mini player thumbnail
+      if (state.videoId && state.videoId !== currentVideoId) {
+        currentVideoId = state.videoId;
+        showMiniPlayer(state.videoId);
       }
 
       // Progress
@@ -198,66 +224,150 @@
         totalTimeEl.textContent = '0:00';
       }
 
-      // Volume (only update slider if user isn't dragging)
+      // Volume
       if (!volumeSlider.matches(':active')) {
         volumeSlider.value = state.volume;
         volumeValue.textContent = state.volume;
         updateSliderTrack(state.volume);
       }
 
-      // Mute
       isMuted = state.muted;
       updateMuteUI();
     }
 
+    // ── Mini Player ──
+    function showMiniPlayer(videoId) {
+      miniPlaceholder.style.display = 'none';
+      miniPlayerIframe.innerHTML = `<img src="https://img.youtube.com/vi/${videoId}/hqdefault.jpg" alt="Now playing" class="mini-thumbnail">`;
+      miniPlayerIframe.style.display = 'block';
+    }
+
+    // ── Search ──
+    searchInput.addEventListener('input', () => {
+      const q = searchInput.value.trim();
+      btnClear.style.display = q.length > 0 ? 'flex' : 'none';
+
+      if (searchTimer) clearTimeout(searchTimer);
+      if (q.length === 0) {
+        resultsGrid.innerHTML = '';
+        searchLoading.style.display = 'none';
+        searchEmpty.style.display = 'none';
+        return;
+      }
+
+      // Debounce 500ms
+      searchTimer = setTimeout(() => searchYouTube(q), 500);
+    });
+
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        if (searchTimer) clearTimeout(searchTimer);
+        const q = searchInput.value.trim();
+        if (q.length > 0) searchYouTube(q);
+      }
+    });
+
+    btnClear.addEventListener('click', () => {
+      searchInput.value = '';
+      btnClear.style.display = 'none';
+      resultsGrid.innerHTML = '';
+      searchLoading.style.display = 'none';
+      searchEmpty.style.display = 'none';
+      searchInput.focus();
+    });
+
+    async function searchYouTube(query) {
+      searchLoading.style.display = 'flex';
+      searchEmpty.style.display = 'none';
+      resultsGrid.innerHTML = '';
+
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        searchLoading.style.display = 'none';
+
+        if (!data.videos || data.videos.length === 0) {
+          searchEmpty.style.display = 'flex';
+          return;
+        }
+
+        renderResults(data.videos);
+      } catch (err) {
+        searchLoading.style.display = 'none';
+        searchEmpty.style.display = 'flex';
+        console.error('Search failed:', err);
+      }
+    }
+
+    function renderResults(videos) {
+      resultsGrid.innerHTML = '';
+      videos.forEach((video, i) => {
+        const card = document.createElement('button');
+        card.className = 'video-card';
+        card.style.animationDelay = `${i * 40}ms`;
+        card.setAttribute('aria-label', `Play ${video.title}`);
+        card.innerHTML = `
+          <div class="video-thumb-wrapper">
+            <img src="${video.thumbnail}" alt="" class="video-thumb" loading="lazy">
+            <span class="video-duration">${video.duration || ''}</span>
+            <div class="video-play-overlay">
+              <span class="video-play-icon">▶</span>
+            </div>
+          </div>
+          <div class="video-meta">
+            <span class="video-title">${escapeHtml(video.title)}</span>
+            <span class="video-channel">${escapeHtml(video.channel)}${video.views ? ' · ' + video.views + ' views' : ''}</span>
+          </div>
+        `;
+        card.addEventListener('click', () => {
+          sendCommand('loadVideo', video.id);
+          currentVideoId = video.id;
+          showMiniPlayer(video.id);
+          miniPlayerTitle.textContent = video.title;
+          // Scroll to top to see mini player
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
+        resultsGrid.appendChild(card);
+      });
+    }
+
+    function escapeHtml(text) {
+      const el = document.createElement('span');
+      el.textContent = text;
+      return el.innerHTML;
+    }
+
+    // ── Helpers ──
     function formatTime(seconds) {
       const s = Math.floor(seconds);
       const m = Math.floor(s / 60);
       const sec = s % 60;
       const h = Math.floor(m / 60);
       const min = m % 60;
-      if (h > 0) {
-        return `${h}:${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
-      }
+      if (h > 0) return `${h}:${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
       return `${min}:${String(sec).padStart(2, '0')}`;
     }
 
-    // ── Volume Slider Track Fill ──
     function updateSliderTrack(val) {
-      const pct = val + '%';
-      volumeSlider.style.background = `linear-gradient(to right, var(--accent) 0%, var(--accent) ${pct}, rgba(255,255,255,0.08) ${pct})`;
+      volumeSlider.style.background = `linear-gradient(to right, var(--accent) 0%, var(--accent) ${val}%, rgba(255,255,255,0.08) ${val}%)`;
     }
 
-    // ── Mute UI ──
     function updateMuteUI() {
       if (isMuted) {
         muteIcon.textContent = '🔇';
         btnMute.classList.add('muted');
       } else {
         const vol = parseInt(volumeSlider.value, 10);
-        if (vol === 0) muteIcon.textContent = '🔇';
-        else if (vol < 50) muteIcon.textContent = '🔉';
-        else muteIcon.textContent = '🔊';
+        muteIcon.textContent = vol === 0 ? '🔇' : vol < 50 ? '🔉' : '🔊';
         btnMute.classList.remove('muted');
       }
     }
 
     // ── Event Listeners ──
-    btnPlayPause.addEventListener('click', () => {
-      sendCommand(isPlaying ? 'pause' : 'play');
-    });
-
-    btnRewind.addEventListener('click', () => {
-      sendCommand('seekBackward');
-    });
-
-    btnForward.addEventListener('click', () => {
-      sendCommand('seekForward');
-    });
-
-    btnMute.addEventListener('click', () => {
-      sendCommand('toggleMute');
-    });
+    btnPlayPause.addEventListener('click', () => sendCommand(isPlaying ? 'pause' : 'play'));
+    btnRewind.addEventListener('click', () => sendCommand('seekBackward'));
+    btnForward.addEventListener('click', () => sendCommand('seekForward'));
+    btnMute.addEventListener('click', () => sendCommand('toggleMute'));
 
     volumeSlider.addEventListener('input', () => {
       const val = parseInt(volumeSlider.value, 10);
@@ -266,20 +376,6 @@
       updateMuteUI();
       sendCommand('setVolume', val);
     });
-
-    btnLoad.addEventListener('click', loadVideo);
-
-    videoInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') loadVideo();
-    });
-
-    function loadVideo() {
-      const val = videoInput.value.trim();
-      if (!val) return;
-      sendCommand('loadVideo', val);
-      videoInput.value = '';
-      videoInput.blur();
-    }
 
     // ── Connection Status ──
     function updateConnectionStatus(status) {
